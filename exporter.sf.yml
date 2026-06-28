@@ -1,0 +1,115 @@
+StartAt: GenerateMonthTasks
+States:
+  GenerateMonthTasks:
+    Type: Task
+    Resource: arn for lambda
+    Parameters:
+      task_type: generate_months
+      s3Bucket.$: $.s3Bucket
+      s3Prefix.$: $.s3Prefix
+      logGroups.$: $.logGroups
+      cutoffDays.$: $.cutoffDays
+    ResultPath: $.generated
+    Retry:
+      - ErrorEquals:
+          - States.TaskFailed
+        IntervalSeconds: 10
+        MaxAttempts: 3
+        BackoffRate: 2
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Next: GenerateFailed
+        ResultPath: $.error
+    Next: CheckIfAnyOldData
+  CheckIfAnyOldData:
+    Type: Choice
+    Choices:
+      - Variable: $.generated.exportTasks[0]
+        IsPresent: true
+        Next: ExportAllTasks
+    Default: NoExportTasks
+  NoExportTasks:
+    Type: Succeed
+  GenerateFailed:
+    Type: Fail
+    Error: GenerateMonthsFailed
+    Cause: Failed to generate month task list from log group metadata
+  ExportAllTasks:
+    Type: Map
+    ItemsPath: $.generated.exportTasks
+    MaxConcurrency: 1
+    Iterator:
+      StartAt: CreateExportTask
+      States:
+        CreateExportTask:
+          Type: Task
+          Resource: arn for lambda
+          ResultPath: $
+          Retry:
+            - ErrorEquals:
+                - LimitExceededException
+                - ServiceUnavailableException
+              IntervalSeconds: 60
+              MaxAttempts: 5
+              BackoffRate: 2
+          Catch:
+            - ErrorEquals:
+                - States.ALL
+              Next: HandleFailure
+              ResultPath: $.error
+          Next: WaitForExport
+        WaitForExport:
+          Type: Wait
+          Seconds: 30
+          Next: PollExportStatus
+        PollExportStatus:
+          Type: Task
+          Resource: arn for lambda
+          Parameters:
+            task_type: poll
+            taskId.$: $.taskId
+            logGroupName.$: $.logGroupName
+            s3Bucket.$: $.s3Bucket
+            year.$: $.year
+            month.$: $.month
+          ResultPath: $
+          Retry:
+            - ErrorEquals:
+                - States.TaskFailed
+              IntervalSeconds: 15
+              MaxAttempts: 3
+              BackoffRate: 2
+          Catch:
+            - ErrorEquals:
+                - States.ALL
+              Next: HandleFailure
+              ResultPath: $.error
+          Next: IsExportDone
+        IsExportDone:
+          Type: Choice
+          Choices:
+            - Variable: $.isFailed
+              BooleanEquals: true
+              Next: HandleFailure
+            - Variable: $.isComplete
+              BooleanEquals: true
+              Next: ExportSucceeded
+          Default: WaitForExport
+        ExportSucceeded:
+          Type: Succeed
+        HandleFailure:
+          Type: Pass
+          Parameters:
+            logGroupName.$: $.logGroupName
+            year.$: $.year
+            month.$: $.month
+            status.$: $.status
+            statusMessage.$: $.statusMessage
+            error.$: $.error
+          Next: ExportFailed
+        ExportFailed:
+          Type: Fail
+          Error: ExportTaskFailed
+          Cause: CloudWatch export task failed or canceled
+    End: true
